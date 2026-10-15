@@ -16,3 +16,4 @@ wechat_probe.png
 build/
 dist/
 *.spec.bak
+/.build-chatgpt/

@@ -5,6 +5,7 @@ import re
 import time
 
 import numpy as np
+import cv2
 from rapidocr_onnxruntime import RapidOCR
 
 from app.chatapps import DEFAULT, ChatApp
@@ -37,14 +38,32 @@ def _engine(app: ChatApp = DEFAULT):
 def read_title(header, app: ChatApp = DEFAULT):
     """面板头部那一条截图 → 会话名（numpy RGB）。取最靠上的一行，同一行里取最左的
     （右边是图标按钮，OCR 不出字；下面那行是公告）。群聊的成员数「(422)」去掉，只留名字当 key。
-    认不出返回 ""。一次约 60ms，所以调用方只在头部像素变了时才问。"""
-    res, _ = _engine(app)(header, use_cls=False)
-    if not res:
+    小号英文/特殊字体名称在原尺寸下可能漏检，失败时放大 2/3 倍再识别。
+    认不出返回 ""；调用方只在头部像素变了时才问。"""
+    if header.size == 0:
         return ""
-    first = min(res, key=lambda r: r[0][0][1])
-    row = first[0][0][1] + (first[0][2][1] - first[0][0][1])  # 框底：顶在这之上的算同一行
-    text = min((r for r in res if r[0][0][1] < row), key=lambda r: r[0][0][0])[1]
-    return re.sub(r"\s*[（(]\d+[)）]\s*$", "", text.strip())
+    engine = _engine(app)
+    best_title, best_score = "", -1.0
+    for scale in (1, 2, 3):
+        crop = header if scale == 1 else cv2.resize(
+            header, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        res, _ = engine(crop, use_cls=False)
+        # Controls live on the right; their icon OCR must not become a conversation name.
+        res = [r for r in res or [] if r[0][0][0] < crop.shape[1] * 0.65
+               and r[1].strip() and r[1].strip() not in ("<", ">", "‹", "›", "…", "...")]
+        if not res:
+            continue
+        first = min(res, key=lambda r: r[0][0][1])
+        row = first[0][2][1]
+        result = min((r for r in res if r[0][0][1] < row), key=lambda r: r[0][0][0])
+        title = re.sub(r"\s*[（(]\d+[)）]\s*$", "", result[1].strip())
+        if title:
+            score = float(result[2])
+            if score > best_score:
+                best_title, best_score = title, score
+            if score >= 0.9:
+                return title
+    return best_title
 
 
 def who_said(chat, box, app: ChatApp = DEFAULT):
@@ -73,7 +92,10 @@ def who_said(chat, box, app: ChatApp = DEFAULT):
         ink_h = max(ink_h, best)
     if app.is_me(bg):  # 自己的气泡：微信是绿色，KakaoTalk 是 #FEE500（见 app/chatapps.py）
         return "me", bg, ink_h
-    return ("her" if diff.max() >= 150 else "gray"), bg, ink_h
+    # WeChat's dark incoming bubbles use lighter gray text, whose contrast is ~120–145.
+    # Pane labels/timestamps remain excluded separately by Reader's on-pane check.
+    threshold = 110 if bg @ [0.299, 0.587, 0.114] < 128 else 150
+    return ("her" if diff.max() >= threshold else "gray"), bg, ink_h
 
 
 def similar(a, b):

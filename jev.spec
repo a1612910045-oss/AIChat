@@ -4,7 +4,7 @@ onedir 不是 onefile：PySide6 + onnxruntime 打出来 ~150MB，onefile 每次�
 只在 Windows 上跑，下面的 collect_all 也只认 Windows 上装好的那几个包。"""
 from PyInstaller.utils.hooks import collect_all
 
-NAME = "jev-chat-windows"
+NAME = "gpt-chat-helper"
 
 hiddenimports = [
     # spawn 出来的采集子进程按名字 import app.worker，再顺着它拉 capture/ocr；
@@ -12,7 +12,7 @@ hiddenimports = [
     "app.worker", "app.capture", "app.ocr", "app.fill", "app.overlay", "app.settings",
     "app.version", "app.update", "app.debugwin",  # debugwin 是开了调试视图才 import 的
     "core.engine", "core.draft", "core.jev_client", "core.questions", "core.providers",
-    "core.llm",
+    "core.llm", "core.chatgpt_auth", "app.chatgpt_account",
 ]
 datas, binaries = [], []
 datas += [("docs/wechat-mp.png", "docs")]  # 设置页底部的公众号长条横幅
@@ -23,9 +23,8 @@ for pkg in (
     "windows_capture",       # Rust 编译的 .pyd
     # 四个模型 SDK：core/llm.py 和 jev_client 里是**函数内 import**，静态分析扫不到，必须显式收
     "openai",
-    "typesafe_sdk",
-    "anthropic",
-    "google.genai",
+    "jwt",
+    "cryptography",
     "certifi",               # httpx 的 CA 证书包；certifi 的官方 hook 通常收得到，这里写明白省得漏
 ):
     d, b, h = collect_all(pkg)

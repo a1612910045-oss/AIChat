@@ -77,7 +77,7 @@ def unminimize(hwnd):
     return True
 
 
-def chat_area(full, header_h=60):
+def _legacy_chat_area(full, header_h=60):
     """消息列表区 (x0, y_top, x1, y_in, 面板底色, y_pane)，全靠像素锚点，不写死坐标，深浅主题通用：
     - 面板底色 = 右半边最常见的颜色（抽样算，全量 np.unique 在 2560 宽的图上要半秒）
     - 面板左/右边界 = 第一/最后一根「底色占比 > 30%」的列（联系人列表是另一种底色，占比 0）
@@ -109,14 +109,80 @@ def chat_area(full, header_h=60):
     return x0, y_top, x1, y_in, bg, y0
 
 
+def _horizontal_rules(full):
+    """Thin, long horizontal strokes near the right edge, independent of pane colors."""
+    height, width = full.shape[:2]
+    pixels = full.astype(np.int16)
+    minimum = max(100, int(width * 0.3))
+    right_margin = max(32, int(width * 0.06))
+    rules = []
+    for gap in (1, 2, 3):
+        middle = pixels[gap:-gap]
+        above, below = pixels[:-2 * gap], pixels[2 * gap:]
+        stroke = ((np.abs(middle - above).max(2) >= 3) &
+                  (np.abs(middle - below).max(2) >= 3))
+        # Text, icons and avatars cannot form a long run of one line color.
+        flat = np.abs(middle[:, 1:] - middle[:, :-1]).max(2) <= 2
+        stroke[:, 1:] &= flat
+        stroke[:, :-1] &= flat
+        for row in np.flatnonzero(stroke.sum(1) >= minimum):
+            edges = np.diff(np.pad(stroke[row].astype(np.int8), (1, 1)))
+            starts, ends = np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
+            for left, right in zip(starts, ends):
+                if right - left >= minimum and right >= width - right_margin:
+                    item = (int(row + gap), int(left), int(right))
+                    if not any(abs(item[0] - old[0]) <= 3 and abs(item[1] - old[1]) <= 6
+                               for old in rules):
+                        rules.append(item)
+    return sorted(rules)
+
+
+def chat_area(full, header_h=60, app=None):
+    """Locate a conversation using its header divider and composer top border.
+
+    A roster has no message composer. Never treat its bottom window edge as one.
+    Header/composer anchors also isolate the right pane when sidebar colors match it.
+    """
+    if full.ndim != 3 or full.shape[2] != 3 or min(full.shape[:2]) < 100:
+        return None
+    if app is not None and app.key != "wechat":
+        return _legacy_chat_area(full, header_h)
+    height, width = full.shape[:2]
+    rules = _horizontal_rules(full)
+    alignment = max(24, int(width * 0.035))
+    for input_y, input_left, input_right in rules:
+        if not 0.4 * height < input_y < 0.9 * height:
+            continue
+        headers = [(y, left, right) for y, left, right in rules
+                   if max(20, height * 0.04) < y < min(height * 0.35, input_y - 60)
+                   and abs(left - input_left) <= alignment
+                   and abs(right - input_right) <= alignment]
+        if not headers:
+            continue
+        header_y, left, right = headers[-1]
+        # A rounded composer border begins a few pixels inside the actual pane.
+        x0, x1 = min(left, input_left), max(right, input_right)
+        if input_y - header_y < 40 or x1 - x0 < 100:
+            continue
+        crop = full[header_y + 1:input_y, x0:x1]
+        values, counts = np.unique(crop[::8, ::8].reshape(-1, 3), axis=0, return_counts=True)
+        bg = values[counts.argmax()]
+        background = (np.abs(full[:header_y, x0:x1].astype(np.int16) - bg).sum(2) <= 6).mean(1)
+        rows = np.flatnonzero(background > 0.75)
+        pane_top = int(rows[0]) if rows.size else max(0, header_y - header_h)
+        return x0, header_y + 1, x1, input_y, bg, pane_top
+    return None
+
+
 class Capture:
     """WGC 盯窗口。采集线程只做「跟上一帧比」；settled() 在画面停稳后交出整帧，中间帧（滚动动画、
     新消息滑入的半截气泡）全跳过。动图表情永远停不稳，所以最多等 max_wait 秒照样交。"""
 
-    def __init__(self, hwnd, settle=0.25, max_wait=1.0):
+    def __init__(self, hwnd, settle=0.25, max_wait=1.0, app=None):
         from windows_capture import WindowsCapture
 
         self.settle, self.max_wait = settle, max_wait
+        self.app = app
         self.shape = self.area = self.last = self.pending = None
         self.t = self.t0 = 0.0
         # 包装层默认 cursor_capture=True，会去调 SetIsCursorCaptureEnabled。
@@ -132,12 +198,14 @@ class Capture:
         if full.max() == 0:
             return
         if self.area is None or full.shape != self.shape:
-            self.shape, self.area = full.shape, chat_area(full)
-        if self.area is None:
-            return
-        x0, y0, x1, y1 = self.area[:4]  # 拿上一次的消息区做 diff 就够了，光标闪烁在输入框里，不算变化
+            self.shape, self.area = full.shape, chat_area(full, app=self.app)
         # ponytail: diff 不含头部——公告条会滚动，带上它就永远停不稳。切会话时消息区必然也变，照样出帧。
-        chat = full[y0:y1, x0:x1]
+        if self.area is None:
+            # Deliver invalid layouts too, so the worker can report a roster instead of timing out.
+            chat = full
+        else:
+            x0, y0, x1, y1 = self.area[:4]
+            chat = full[y0:y1, x0:x1]
         if self.last is not None and np.array_equal(chat, self.last):
             return
         self.last = chat

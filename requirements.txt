@@ -15,3 +15,6 @@ winsdk                        # Windows.Media.Ocr: the ko/ja recognizers RapidOC
 
 # optional, only for the two old UIA probes (already disproved; install to reproduce)
 # uiautomation                # probe_win.py / probe_win2.py
+
+# Official ChatGPT OAuth ID-token signature verification.
+PyJWT[crypto]>=2.10,<3
